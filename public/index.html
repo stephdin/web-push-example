@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Web Push Demo</title>
+  <!-- Manifest + icon: required on iOS to "Add to Home Screen" as a web app,
+       which is the only way iOS allows web push. -->
+  <link rel="manifest" href="/manifest.json">
+  <link rel="apple-touch-icon" href="/icon.png">
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 32rem; margin: 2rem auto; padding: 0 1rem; }
+    button { font-size: 1rem; padding: .6rem 1rem; margin: 0 .5rem .5rem 0; }
+    pre { background: #f3f3f3; padding: 1rem; white-space: pre-wrap; }
+  </style>
+</head>
+<body>
+  <h1>Web Push Demo</h1>
+  <button id="enable">Enable notifications</button>
+  <button id="test">Send test push</button>
+  <pre id="log"></pre>
+
+  <script>
+    const log = (msg) => { document.getElementById('log').textContent += msg + '\n' }
+
+    // The VAPID public key is Base64URL-encoded, but pushManager.subscribe()
+    // expects raw bytes: restore padding, map URL-safe chars, decode.
+    const urlBase64ToUint8Array = (base64) => {
+      const padded = (base64 + '='.repeat((4 - base64.length % 4) % 4)).replace(/-/g, '+').replace(/_/g, '/')
+      return Uint8Array.from(atob(padded), (c) => c.charCodeAt(0))
+    }
+
+    // Push requires a secure context (HTTPS or localhost). On plain HTTP over
+    // the LAN, or in a regular iOS Safari tab, these APIs don't exist.
+    // Sending still works there, since it's just a normal fetch to the server.
+    if (!('serviceWorker' in navigator) || !('PushManager' in window)) {
+      document.getElementById('enable').disabled = true
+      log('ℹ️ Receiving is not possible here (HTTPS required; on iOS also open from the Home Screen).')
+      log('   "Send test push" still works and sends to all subscribers.')
+    }
+
+    document.getElementById('enable').onclick = async () => {
+      try {
+        log('1. Registering service worker …')
+        const reg = await navigator.serviceWorker.register('/sw.js')
+        await navigator.serviceWorker.ready
+
+        // Must be called directly from a user gesture (click), iOS requires that.
+        log('2. Requesting permission …')
+        const permission = await Notification.requestPermission()
+        if (permission !== 'granted') throw new Error('Permission: ' + permission)
+
+        log('3. Fetching VAPID public key …')
+        const { publicKey } = await (await fetch('/api/vapid-public-key')).json()
+
+        // The browser contacts its push service and returns a subscription
+        // (endpoint URL + encryption keys). userVisibleOnly: true is mandatory:
+        // every push must show a visible notification.
+        log('4. Subscribing to push …')
+        const sub = await reg.pushManager.subscribe({
+          userVisibleOnly: true,
+          applicationServerKey: urlBase64ToUint8Array(publicKey),
+        })
+
+        // The server needs the subscription to send pushes to this browser later.
+        log('5. Sending subscription to server …')
+        const res = await fetch('/api/subscribe', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(sub),
+        })
+        log('✅ Done: ' + JSON.stringify(await res.json()))
+      } catch (err) {
+        log('❌ Error: ' + err.message)
+      }
+    }
+
+    // Asks the server to push to all stored subscriptions (including this one).
+    document.getElementById('test').onclick = async () => {
+      try {
+        const res = await fetch('/api/notify', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ title: 'Test push', body: 'Sent at ' + new Date().toLocaleTimeString() }),
+        })
+        log('📨 ' + JSON.stringify(await res.json()))
+      } catch (err) {
+        log('❌ Error: ' + err.message)
+      }
+    }
+  </script>
+</body>
+</html>
